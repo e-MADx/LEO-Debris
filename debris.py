@@ -267,3 +267,369 @@ pd.Series({
 }).to_csv(f"{MODEL_DIR}/final_metrics.csv")
 
 print("Done. Learning curves saved to:", f"{MODEL_DIR}/learning_curves_rmse_mae.png")
+
+# Extract model + scaler from pipeline
+xgb_model = pipeline.named_steps["xgb"]
+scaler = pipeline.named_steps["scaler"]
+
+# Sample a small batch
+idx_sample = np.random.choice(X_train.shape[0], size=min(X_train.size, X_train.shape[0]), replace=False)
+X_sample_raw = X_train[idx_sample]
+X_sample = scaler.transform(X_sample_raw)   # MUST SCALE BEFORE SHAP
+
+# Build SHAP masker (defines background distribution)
+masker = shap.maskers.Independent(data=X_sample, max_samples=100)
+
+# Build universal SHAP explainer
+explainer = shap.Explainer(
+    xgb_model.predict,        # function to explain
+    masker=masker,            # background distribution
+    algorithm="permutation"   # works for any model
+)
+
+# Compute SHAP values
+shap_values = explainer(X_sample)
+
+# Summary plot
+# plt.figure(figsize=(10,6))
+shap.summary_plot(shap_values, X_sample, feature_names=FEATURES, show=True, cmap="viridis")
+plt.tight_layout()
+plt.show()
+plt.savefig(f"{MODEL_DIR}/shap_summary.png", dpi=450)
+
+# Extract model + scaler
+xgb_model = pipeline.named_steps["xgb"]
+scaler = pipeline.named_steps["scaler"]
+
+# -------------------------------
+# 1. Prepare sample batch for SHAP
+# -------------------------------
+idx_sample = np.random.choice(X_train.shape[0], size=min(X_train.size, X_train.shape[0]), replace=False)
+X_sample_raw = X_train[idx_sample]
+X_sample = scaler.transform(X_sample_raw)
+
+# -------------------------------
+# 2. Build masker + explainer
+# -------------------------------
+masker = shap.maskers.Independent(data=X_sample, max_samples=X_train.size)
+
+explainer = shap.Explainer(
+    xgb_model.predict,
+    masker=masker,
+    algorithm="permutation"    # safest and most stable for pipelines
+)
+
+# -------------------------------
+# 3. Compute SHAP values
+# -------------------------------
+shap_values = explainer(X_sample)
+
+# Convert to numpy (N_samples × N_features)
+sv = shap_values.values
+
+# =============================================================
+#    PART A — SHAP DEPENDENCE PLOTS (one per feature)
+# =============================================================
+dep_dir = os.path.join(MODEL_DIR, "shap_dependence_plots")
+os.makedirs(dep_dir, exist_ok=True)
+
+for i, feat in enumerate(FEATURES):
+    plt.figure(figsize=(8, 5))
+    shap.dependence_plot(
+        ind=i,
+        shap_values=sv,
+        features=X_sample,
+        feature_names=FEATURES,
+        show=False,
+        cmap = "viridis"
+    )
+    plt.title(f"SHAP Dependence: {feat}")
+    plt.tight_layout()
+    plt.savefig(f"{dep_dir}/dependence_{i}_{feat}.png")
+    plt.show()
+
+print("Saved SHAP dependence plots to:", dep_dir)
+
+import seaborn as sns
+import matplotlib.pyplot as plt
+
+# PCA loadings matrix (features x components)
+loadings = pca3.components_.T  # shape: (n_features, 3)
+
+# plt.figure(figsize=(10, 6))
+sns.heatmap(loadings,
+            annot=True,
+            fmt=".2f",
+            # cmap="magma",
+            xticklabels=["PC1", "PC2", "PC3"],
+            yticklabels=FEATURES)
+
+plt.title("PCA Loading Heatmap")
+plt.tight_layout()
+plt.savefig("PCA_loadings_heatmap.png", dpi=450)
+plt.show()
+
+
+# Use first 2 components for correlation circle
+loadings_2d = pca3.components_[:2].T
+
+plt.figure(figsize=(8, 8))
+plt.axhline(0, color="gray", lw=0.8)
+plt.axvline(0, color="gray", lw=0.8)
+
+# Draw unit circle
+theta = np.linspace(0, 2*np.pi, 200)
+plt.plot(np.cos(theta), np.sin(theta), "k--", alpha=0.5)
+
+# Plot each feature vector
+for i, feature in enumerate(FEATURES):
+    x, y = loadings_2d[i]
+    plt.arrow(0, 0, x, y, color="red", linewidth=1.8, head_width=0.03)
+    plt.text(x*1.1, y*1.1, feature, fontsize=11)
+
+# plt.title("PCA Correlation Circle (PC1 vs PC2)")
+plt.xlabel(f"PC1 (37%)")
+plt.ylabel(f"PC2 (29%)")
+
+plt.xlim(-1.1, 1.1)
+plt.ylim(-1.1, 1.1)
+# plt.grid(alpha=0.3)
+plt.tight_layout()
+plt.savefig("PCA_correlation_circle.png", dpi=300)
+plt.show()
+
+OUT_DIR = "surrogate_model_outputs/feature_ranking"
+os.makedirs(OUT_DIR, exist_ok=True)
+
+# Sample SHAP values already computed earlier
+sv = shap_values_obj.values
+if isinstance(sv, list):
+    sv = np.array(sv)
+
+# SHAP importance = mean(|SHAP|) per feature
+shap_importance = np.mean(np.abs(sv), axis=0)
+ranking = sorted(zip(FEATURES, shap_importance), key=lambda x: x[1], reverse=True)
+
+df_rank = pd.DataFrame(ranking, columns=["Feature", "MeanAbsSHAP"])
+df_rank.to_csv(os.path.join(OUT_DIR, "feature_ranking.csv"), index=False)
+
+colors = plt.cm.viridis(np.linspace(0, 1, len(df_rank)))  # colormap -> array of RGBA colors
+
+# Bar plot
+plt.figure(figsize=(10, 6))
+plt.barh(df_rank["Feature"], df_rank["MeanAbsSHAP"], color=colors)
+plt.gca().invert_yaxis()
+plt.xlabel("Mean |SHAP| Impact")
+plt.title("Feature Ranking (SHAP Importance)")
+plt.tight_layout()
+plt.savefig(os.path.join(OUT_DIR, "feature_ranking_barplot.png"), dpi=300)
+plt.show()
+
+print("Feature ranking saved in:", OUT_DIR)
+
+
+# ===========================================================
+# 1) FEATURES & VARIABLES
+# ===========================================================
+FEATURES = [
+    'AltBin', 'IncBin', 'Count', 'count_log',
+    'Density', 'dens_log', 'Combined Mass',
+    'mass_log', 'Volume_m3'
+]
+
+VARIABLES = ['AltBin', 'IncBin', 'Count', 'Density', 'Combined Mass']
+
+
+# ===========================================================
+# 2) BASELINE VALUES
+# ===========================================================
+baseline = {
+    "AltBin": df["AltBin"].median(),
+    "IncBin": df["IncBin"].median(),
+    "Count": df["Count"].median(),
+    "Density": df["Density"].median(),
+    "Combined Mass": df["Combined Mass"].median(),
+    "Volume_m3": df["Volume_m3"].median(),
+}
+baseline_count = baseline["Count"]
+
+
+# ===========================================================
+# 3) MAKE FEATURE VECTOR
+# ===========================================================
+def make_feature_vector(ind):
+    AltBin, IncBin, Count, Density, Combined Mass = ind
+
+    return np.array([
+        AltBin,
+        IncBin,
+        Count,
+        np.log10(Count + 1e-9),
+        Density,
+        np.log10(Density + 1e-12),
+        Combined Mass,
+        np.log10(Combined Mass + 1e-6),
+        baseline["Volume_m3"]
+    ])
+
+
+# ===========================================================
+# 4) PREDICTION FUNCTION (THIS IS WHAT WAS MISSING)
+# ===========================================================
+scaler = pipeline.named_steps["scaler"]
+xgb_model = pipeline.named_steps["xgb"]
+
+def predict_risk(ind):
+    x = make_feature_vector(ind)
+    x_scaled = scaler.transform([x])
+    y_log = xgb_model.predict(x_scaled)[0]
+    return 10**y_log   # convert log10 → real risk
+
+
+# ===========================================================
+# 5) CONSTRAINTS AND PARAMETERS
+# ===========================================================
+MAX_CAPACITY = 12000          # Example: change to your real system limit
+MAX_RELATIVE_DECREASE = 0.5   # do not reduce Count by more than -50%
+MAX_RELATIVE_INCREASE = 2.0   # do not increase Count by more than +200%
+PENALTY_MULTIPLIER = 1e6       # strong penalty
+
+
+# ===========================================================
+# 6) EVALUATION FUNCTION
+# ===========================================================
+def evaluate_penalty_capacity(ind):
+    """
+    Objective 1: minimize predicted risk
+    Objective 2: maximize available capacity (via minimizing its negative)
+    With penalties if Count deviates too much from baseline
+    """
+
+    # Extract variables
+    alt, inc, count, density, mass = ind
+
+    # ---------- OBJ 1: risk ----------
+    risk = predict_risk(ind)
+
+    # ---------- OBJ 2: negative capacity (because DEAP minimizes) ----------
+    available = MAX_CAPACITY - count
+    neg_available = -available
+
+    # ---------- Constraints (penalties) ----------
+    rel_change = (count - baseline_count) / (baseline_count + 1e-12)
+    penalty = 0.0
+
+    if rel_change < -MAX_RELATIVE_DECREASE:
+        penalty += abs(rel_change + MAX_RELATIVE_DECREASE) * PENALTY_MULTIPLIER
+
+    if rel_change > MAX_RELATIVE_INCREASE:
+        penalty += abs(rel_change - MAX_RELATIVE_INCREASE) * PENALTY_MULTIPLIER
+
+    # Apply penalty to both objectives
+    if penalty > 0:
+        return (risk + penalty, neg_available + penalty)
+
+    return (risk, neg_available)
+
+# ===========================================================
+# 7) DEAP: CREATOR & TOOLBOX
+# ===========================================================
+from deap import base, creator, tools, algorithms
+import random
+import numpy as np
+import pandas as pd
+
+# Fitness: minimize both objectives
+creator.create("FitnessMin", base.Fitness, weights=(-1.0, -1.0))
+creator.create("Individual", list, fitness=creator.FitnessMin)
+
+toolbox = base.Toolbox()
+
+# Attribute generators (respect dataset bounds)
+bounds = {
+    "AltBin": (df["AltBin"].min(), df["AltBin"].max()),
+    "IncBin": (df["IncBin"].min(), df["IncBin"].max()),
+    "Count": (df["Count"].min(), df["Count"].max()),
+    "Density": (df["Density"].min(), df["Density"].max()),
+    "Combined Mass": (df["Combined Mass"].min(), df["Combined Mass"].max()),
+}
+
+for v in VARIABLES:
+    low, high = bounds[v]
+    toolbox.register(f"attr_{v}", random.uniform, low, high)
+
+# Create individual
+toolbox.register(
+    "individual",
+    tools.initCycle,
+    creator.Individual,
+    [toolbox.__getattribute__(f"attr_{v}") for v in VARIABLES],
+    n=1
+)
+
+# Population
+toolbox.register("population", tools.initRepeat, list, toolbox.individual)
+
+# Operators
+toolbox.register("evaluate", evaluate_penalty_capacity)
+
+toolbox.register("mate", tools.cxSimulatedBinaryBounded,
+    low=[bounds[v][0] for v in VARIABLES],
+    up=[bounds[v][1] for v in VARIABLES],
+    eta=20)
+
+toolbox.register("mutate", tools.mutPolynomialBounded,
+    low=[bounds[v][0] for v in VARIABLES],
+    up=[bounds[v][1] for v in VARIABLES],
+    eta=20, indpb=0.2)
+
+toolbox.register("select", tools.selNSGA2)
+
+
+
+# ===========================================================
+# 8) RUN NSGA-II
+# ===========================================================
+
+POP = 150
+NGEN = 120
+
+pop = toolbox.population(n=POP)
+hof = tools.ParetoFront()
+
+algorithms.eaMuPlusLambda(
+    population=pop,
+    toolbox=toolbox,
+    mu=POP,
+    lambda_=POP * 2,
+    cxpb=0.85,
+    mutpb=0.15,            # (0.85 + 0.15 = 1.0)
+    ngen=NGEN,
+    halloffame=hof,
+    verbose=True
+)
+
+print("NSGA-II optimization complete!")
+# ===========================================================
+# 9) BUILD PARETO RESULT TABLE
+# ===========================================================
+rows = []
+for ind in hof:
+    risk, neg_cap = evaluate_penalty_capacity(ind)
+    cap = -neg_cap                                  # convert back
+    rows.append(list(ind) + [risk, cap])
+
+df_pareto = pd.DataFrame(rows, columns=VARIABLES + ["PredictedRisk", "AvailableCapacity"])
+df_pareto.to_csv("NSGA2_Pareto_Solutions.csv", index=False)
+
+df_pareto.head()
+
+plt.figure(figsize=(8,6))
+plt.scatter(df_pareto["AvailableCapacity"], df_pareto["PredictedRisk"],
+            c=df_pareto["AltBin"], cmap="viridis", s=60)
+plt.xlabel("Available Capacity (slots remaining)")
+plt.ylabel("Predicted Collision Risk")
+plt.title("NSGA-II Pareto Front (Penalty + Capacity)")
+plt.colorbar(label="AltBin")
+plt.grid(True)
+plt.show()
